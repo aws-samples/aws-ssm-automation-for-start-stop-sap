@@ -1,0 +1,1160 @@
+---
+## SAP Stop / Start SSM Automation Document including basic email notification framework.
+## Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+## Permission is hereby granted, free of charge, to any person obtaining a copy of this
+## software and associated documentation files (the "Software"), to deal in the Software
+## without restriction, including without limitation the rights to use, copy, modify,
+## merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+## permit persons to whom the Software is furnished to do so.
+
+## THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+## INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+## PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+## HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+## OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+## SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+AWSTemplateFormatVersion: "2010-09-09"
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+        - Label:
+            default: "Initial Email for Notification Subscription"
+          Parameters:
+            - EmailforNotification
+        - Label:
+            default: "Document Name and Event Rule Identifier for Creation. Unique to this account"
+          Parameters:
+              - SSMSAPStartStopDocName
+              - SSMSAPStartStopEventRulePrefix
+        - Label:
+            default: "Logging and Notification Parameters for Creation. Unique to this account"
+          Parameters:
+            - SNSTopicforNotification
+            - CWLogsLocation
+        - Label:
+            default: "Tags for Instance Identification"
+          Parameters:
+            - SSMEnableTagKey
+            - RoleTagKey
+            - SIDTagKey
+            - HanaTenantTagKey
+
+Parameters:
+  EmailforNotification:
+    Type: String
+    Description: (Required) Subscribe this email to the SNS Topic. You will be sent a confirmation email on creation.
+    AllowedPattern: ^([^.@]+)(\.[^.@]+)*@([^.@]+\.)+([^.@]+)$
+  SNSTopicforNotification:
+    Type: String
+    Description: (Required) The name of the SNS Topic you want to create for email notifications. Must be unique.
+    Default: 'SSMSAPStartStopNotifications'
+  CWLogsLocation:
+    Type: String
+    Description: (Required) The location where run command logs will be stored
+    Default: 'SSMSAPStartStopCWLogs'
+  SIDTagKey:
+    Description: (Required) The key of the tag which contains the SAP SID
+    Type: String
+    Default: ssmsap:sid
+  RoleTagKey:
+    Description: >-
+      (Required) The key of the tag which contains application role. The allowed values for this tag are 'HANA', 'SCS', 'APP'
+    Type: String
+    Default: ssmsap:role
+  HanaTenantTagKey:
+    Description: >-
+      (Required) The key of the tag which contains the HANA Tenant if applicable, referenced by SAP SID.
+    Type: String
+    Default: ssmsap:hanatenant
+  SSMEnableTagKey:
+    Description: >-
+      (Required) The key of the tag to indicate if SSM stop/start is enabled. The allowed values for this tag are 'TRUE' or 'FALSE'
+    Type: String
+    Default: ssmsap:enabled
+  SSMSAPStartStopDocName:
+    Description: (Required) The SSM Automation Document or Runbook Name. Must be unique
+    Type: String
+    Default: ssmsapstartstop
+  SSMSAPStartStopEventRulePrefix:
+    Description: (Required) The Event Rule Prefix for notications associated with the SMS Document. Must be unique.
+    Type: String
+    Default: ssmsapstartstop
+Resources:
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Ref SNSTopicforNotification
+      DisplayName: "SSM SAP Operations Notification"
+      Subscription:
+        - Endpoint: !Ref EmailforNotification
+          Protocol: email
+  SapSsmDocument:
+    Type: "AWS::SSM::Document"
+    Properties:
+      DocumentType : Automation
+      Name: !Ref SSMSAPStartStopDocName
+      Content:
+        description: !Sub |
+
+          # SAP on HANA Stop / Start Operations Document
+          Sample SSM Doc for stopping and starting a SAP Netweaver System running on a HANA DB, including a clean application
+          aware stop/start coordinated with instance stop/start.
+
+
+          - SSM needs to be configured on all hosts, with the appropriate IAM Role. Refer to the documentation on [SSM Setup](https://docs.aws.amazon.com/systems-manager/latest/userguide/what-is-systems-manager.html)
+          - Subscribe to ${SNSTopicforNotification}. Confirm email from Cloudformation, or subscribe in the console.
+          - Remove any Autostart parameters in SAP and HANA profiles if set to 1.
+          - The tag requirements are as follows
+          - NOTE: Tag filters are case sensitive, the tag keys are as described below, tag values in uppercase.
+              - (all) ** ${SSMEnableTagKey}  = ** TRUE (or false to disable)
+              - (all) ** ${RoleTagKey} = ** HANA,APP,SCS or combination (if app and scs are on the same instance use APP,SCS all in one use HANA,SCS,APP (order not critical))
+              - (on the app and scs) ** ${SIDTagKey} =  ** The SID of the Netweaver system.
+              - (on the hana system) ** ${HanaTenantTagKey} = ** The SID of the Netweaver system (not the HANA SID unless its the same). Use SAP SID even if your actual db tenant name is not aligned with SID.
+
+
+          This will not work for multi-tenant HANA DBs, multi hosted SIDs, or High Availability setups because of dependencies.
+
+
+          ** Warning ** This document has the potential to STOP critical systems, including the EC2 instances. Make sure you have the right system. Make sure users are logged out or aware of the shutdown.
+
+        schemaVersion: '0.3'
+        assumeRole: '{{ AutomationAssumeRole }}'
+        parameters:
+          SID:
+            type: String
+            description: (Required) Provide the SID you wish to stop or start
+            allowedPattern: "([A-Z]{1}[0-9A-Z]{2})"
+          Operation:
+            type: String
+            description: (Required) Stop/Start
+            allowedPattern: "(Stop|Start)"
+          AutomationAssumeRole:
+            type: String
+            description: >-
+              (Optional) The ARN of the role that allows Automation to perform the
+              actions on your behalf.
+            default: ''
+
+        mainSteps:
+          - name: BRANCH_DecideOperation
+            description: |
+              Step Summary
+
+              ***
+
+              ** Branch according to operation parameter **
+
+              This step uses the Operation parameter defined above (Stop/Start) to select which actions to perform.
+
+              Not all steps below will be performed. Next step is determined by previous step.
+
+              ***
+
+            action: 'aws:branch'
+            inputs:
+              Choices:
+                - NextStep: START_QUERY_AWS_DBInstanceId
+                  Variable: '{{Operation}}'
+                  StringEquals: Start
+                - NextStep: STOP_QUERY_AWS_APPInstanceId
+                  Variable: '{{Operation}}'
+                  StringEquals: Stop
+          - name: START_QUERY_AWS_DBInstanceId
+            description: !Sub |
+              Step Summary
+
+              ***
+
+              ** Query the database instance based on the SID and Role tag **
+
+              Check the following
+                - tag: ${RoleTagKey} = hana
+                - tag: ${HanaTenantTagKey} = (parameter)
+                - tag: ${SSMEnableTagKey} = TRUE
+
+              ***
+
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: ec2
+              Api: DescribeInstances
+              Filters:
+                - Name: !Sub 'tag:${HanaTenantTagKey}'
+                  Values:
+                    - '*{{SID}}*'
+                - Name: !Sub 'tag:${RoleTagKey}'
+                  Values:
+                    - '*HANA*'
+                - Name: !Sub 'tag:${SSMEnableTagKey}'
+                  Values:
+                    - 'TRUE'
+            outputs:
+              - Name: DBInstanceId
+                Selector: '$.Reservations[0].Instances[0].InstanceId'
+                Type: String
+            onFailure: Abort
+            nextStep: START_AWS_DBInstanceId
+          - name: START_AWS_DBInstanceId
+            description: |
+              Step Summary
+
+              ***
+
+              ** Start the AWS EC2 Instance where HANA runs **
+
+              - Uses the InstanceId from the previous step
+              - Changes the state of this instance to "Started" if not already running
+              - Tip: If the root volume is encrypted ensure that the IAM role running this automation has access to the key.
+
+              ***
+
+            action: 'aws:changeInstanceState'
+            inputs:
+              InstanceIds:
+                - '{{START_QUERY_AWS_DBInstanceId.DBInstanceId}}'
+              DesiredState: running
+            onFailure: Abort
+            nextStep: START_DB_HANA
+          - name: START_DB_HANA
+            description:  |
+              Step Summary
+
+              ***
+
+              ** Start HANA application on the instance **
+                - Gets the system number from `/usr/sap/services`
+                - Starts the HANA service using `sapcontrol`
+                - Starts the HANA DB using `sapcontrol`
+
+              ***
+            action: 'aws:runCommand'
+            maxAttempts: 1
+            onFailure: Abort
+            inputs:
+              DocumentName: AWS-RunShellScript
+              InstanceIds:
+                - '{{ START_QUERY_AWS_DBInstanceId.DBInstanceId }}'
+              Parameters:
+                commands:
+                  - '#!/bin/bash'
+                  - >-
+                    SAPProfile=`grep -o 'pf=[^[:space:]]*' /usr/sap/sapservices | grep
+                    _HDB`
+                  - 'SID=`echo ${SAPProfile} | awk -F "/" ''{print $4}''`'
+                  - >-
+                    SYSTEMNO=`echo ${SAPProfile} | awk -F "/" '{print $7}' | awk -F "_"
+                    '{print $2}' | sed 's@^[^0-9]*\([0-9]\+\).*@\1@'`
+                  - >-
+                    echo  "Running /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO}
+                    -function StartService ${SID}"
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    StartService ${SID}
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    WaitforServiceStarted 10 2
+                  - >-
+                    echo  "Running /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO}
+                    -function GetSystemInstanceList"
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetSystemInstanceList
+                  - 'if [ $? -eq 0 ]'
+                  - then
+                  - 'echo "There is a system here, I am going to use start"'
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function StartWait
+                    600 2
+                  - else
+                  - 'echo "There is no service running for instance number ${SYSTEMNO} "'
+                  - exit 1
+                  - fi
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetProcessList
+                  - 'if [ $? -eq 3 ]'
+                  - '        then'
+                  - '           echo "`date +%F\ %T`: The HANA Database Started Successfully"'
+                  - '        else'
+                  - '        echo "The return code was $? "'
+                  - '           exit 1'
+                  - '        fi'
+              CloudWatchOutputConfig:
+                CloudWatchLogGroupName: !Ref CWLogsLocation
+                CloudWatchOutputEnabled: true
+              TimeoutSeconds: 600
+            nextStep: START_QUERY_AWS_ASCSInstanceId
+          - name: START_QUERY_AWS_ASCSInstanceId
+            description: !Sub |
+              Step Summary
+
+              ***
+
+              **  Query the ASCS instance based on the SID and Role tag **
+              Check the following
+                - tag: ${RoleTagKey} = SCS
+                - tag: ${SIDTagKey} = (parameter)
+                - tag: ${SSMEnableTagKey} = TRUE
+
+              ***
+
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: ec2
+              Api: DescribeInstances
+              Filters:
+                - Name: !Sub 'tag:${SIDTagKey}'
+                  Values:
+                    - '*{{SID}}*'
+                - Name: !Sub 'tag:${RoleTagKey}'
+                  Values:
+                    - '*SCS*'
+                - Name: !Sub 'tag:${SSMEnableTagKey}'
+                  Values:
+                    - 'TRUE'
+            outputs:
+              - Name: ASCSInstanceId
+                Selector: '$.Reservations[0].Instances[0].InstanceId'
+                Type: String
+            onFailure: Abort
+            nextStep: START_AWS_ASCSInstanceId
+          - name: START_AWS_ASCSInstanceId
+            description: |
+              Step Summary
+
+              ***
+
+              **  Start the AWS EC2 Instance where ASCS runs **
+
+              - Uses the instanceid from the previous step
+              - Changes the state of this instance to "Started" if not already running
+              - Tip: If the root volume is encrypted ensure that the IAM role running this automation has access to the key.
+
+              ***
+
+            action: 'aws:changeInstanceState'
+            inputs:
+              InstanceIds:
+                - '{{START_QUERY_AWS_ASCSInstanceId.ASCSInstanceId}}'
+              DesiredState: running
+            onFailure: Abort
+            nextStep: START_SAP_ASCS
+          - name: START_SAP_ASCS
+            description: |
+              Step Summary
+
+              ***
+
+              ** Start SAP ASCS application on the instance **
+                - Gets the system number from `/usr/sap/services`
+                - Starts ASCS using `sapcontrol`
+
+              ***
+            action: 'aws:runCommand'
+            maxAttempts: 1
+            onFailure: Abort
+            inputs:
+              DocumentName: AWS-RunShellScript
+              InstanceIds:
+                - '{{ START_QUERY_AWS_ASCSInstanceId.ASCSInstanceId }}'
+              Parameters:
+                commands:
+                  - '#!/bin/bash'
+                  - >-
+                    SAPProfile=`grep -o 'pf=[^[:space:]]*' /usr/sap/sapservices | grep
+                    _ASCS`
+                  - 'SID=`echo ${SAPProfile} | awk -F "/" ''{print $4}''`'
+                  - >-
+                    SYSTEMNO=`echo ${SAPProfile} | awk -F "/" '{print $7}' | awk -F "_"
+                    '{print $2}' | sed 's@^[^0-9]*\([0-9]\+\).*@\1@'`
+                  - >-
+                    echo  "Running /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO}
+                    -function GetSystemInstanceList"
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetSystemInstanceList
+                  - 'if [ $? -eq 0 ]'
+                  - then
+                  - 'echo "There is a system here, I am going to use start"'
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function StartWait
+                    300 2
+                  - else
+                  - 'echo "There is no service running for instance number ${SYSTEMNO} "'
+                  - exit 1
+                  - fi
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetProcessList
+                  - 'if [ $? -eq 3 ]'
+                  - '        then'
+                  - '           echo "`date +%F\ %T`: The ASCS Instance Started Successfully"'
+                  - '        else'
+                  - '        echo "The return code was $? "'
+                  - '           exit 1'
+                  - '        fi'
+              CloudWatchOutputConfig:
+                CloudWatchLogGroupName: !Ref CWLogsLocation
+                CloudWatchOutputEnabled: true
+              TimeoutSeconds: 120
+            nextStep: START_QUERY_AWS_APPInstanceId
+            description: |
+              Step Summary
+
+              ***
+
+              ** Start SAP ASCS application on the instance **
+                - Gets the system number from `/usr/sap/services`
+                - Starts ASCS using `sapcontrol`
+
+              ***
+          - name: START_QUERY_AWS_APPInstanceId
+            description: !Sub |
+              Step Summary
+
+              ***
+
+              ** Query the database instance based on the SID and Role tag **
+
+              Check the following
+                - tag: ${RoleTagKey} = APP
+                - tag: ${SIDTagKey} = (parameter)
+                - tag: ${SSMEnableTagKey} = TRUE
+
+              ***
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: ec2
+              Api: DescribeInstances
+              Filters:
+                - Name: !Sub 'tag:${SIDTagKey}'
+                  Values:
+                    - '*{{SID}}*'
+                - Name: !Sub 'tag:${RoleTagKey}'
+                  Values:
+                    - '*APP*'
+                - Name: !Sub 'tag:${SSMEnableTagKey}'
+                  Values:
+                    - 'TRUE'
+            outputs:
+              - Name: APPInstanceId
+                Selector: '$.Reservations..Instances..InstanceId'
+                Type: StringList
+            onFailure: Abort
+            nextStep: START_AWS_APPInstanceId
+          - name: START_AWS_APPInstanceId
+            description: |
+              Step Summary
+
+              ***
+
+              **  Start the AWS EC2 Instance where the APP runs **
+
+              - Uses the instanceid from the previous step
+              - Changes the state of this instance to "Started" if not already running
+              - Tip: If the root volume is encrypted ensure that the IAM role running this automation has access to the key.
+
+              ***
+            action: 'aws:changeInstanceState'
+            inputs:
+              InstanceIds:
+                - '{{START_QUERY_AWS_APPInstanceId.APPInstanceId}}'
+              DesiredState: running
+            onFailure: Abort
+            nextStep: START_SAP_APP
+          - name: START_SAP_APP
+            description: |
+              Step Summary
+
+              ***
+
+              ** Start SAP ASCS application on the instance **
+                - Gets the system number from `/usr/sap/services`
+                - Starts ASCS using `sapcontrol`
+
+              ***
+            action: 'aws:runCommand'
+            maxAttempts: 1
+            onFailure: Abort
+            inputs:
+              DocumentName: AWS-RunShellScript
+              InstanceIds:
+                - '{{START_QUERY_AWS_APPInstanceId.APPInstanceId}}'
+              Parameters:
+                commands:
+                  - '#!/bin/bash'
+                  - >-
+                    SAPProfile=`grep -o 'pf=[^[:space:]]*' /usr/sap/sapservices | grep
+                    _D`
+                  - 'SID=`echo ${SAPProfile} | awk -F "/" ''{print $4}''`'
+                  - >-
+                    SYSTEMNO=`echo ${SAPProfile} | awk -F "/" '{print $7}' | awk -F "_"
+                    '{print $2}' | sed 's@^[^0-9]*\([0-9]\+\).*@\1@'`
+                  - >-
+                    echo  "Running /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO}
+                    -function GetSystemInstanceList"
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetSystemInstanceList
+                  - 'if [ $? -eq 0 ]'
+                  - then
+                  - 'echo "There is a system here, I am going to use start"'
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function StartWait
+                    300 2
+                  - else
+                  - 'echo "There is no service running for instance number ${SYSTEMNO} "'
+                  - exit 1
+                  - fi
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetProcessList
+                  - 'if [ $? -eq 3 ]'
+                  - '        then'
+                  - '           echo "`date +%F\ %T`: The APP Instance Started Successfully"'
+                  - '        else'
+                  - '        echo "The return code was $? "'
+                  - '           exit 1'
+                  - '        fi'
+              CloudWatchOutputConfig:
+                  CloudWatchLogGroupName: !Ref CWLogsLocation
+                  CloudWatchOutputEnabled: true
+              TimeoutSeconds: 120
+            nextStep: START_QUERY_SAP_Status
+          - name: START_QUERY_SAP_Status
+            description: |
+              Step Summary
+
+              ***
+
+              ** Query the SCS for overall SAP status **
+                - For each system in  `/usr/sap/services`
+                - Output the System Instance List
+
+              ***
+            action: 'aws:runCommand'
+            maxAttempts: 1
+            onFailure: Abort
+            inputs:
+              DocumentName: AWS-RunShellScript
+              InstanceIds:
+                - '{{ START_QUERY_AWS_ASCSInstanceId.ASCSInstanceId }}'
+              Parameters:
+                commands:
+                  - '#!/bin/bash '
+                  - >-
+                    grep -o 'pf=[^[:space:]]*' /usr/sap/sapservices >
+                    /tmp/profilelist.txt
+                  - while read line
+                  - do
+                  - 'SID=`echo ${line} | awk -F "/" ''{print $4}''`'
+                  - >-
+                    SYSTEMNO=`echo ${line} | awk -F "/" '{print $7}' | awk -F "_" '{print
+                    $2}' | sed 's@^[^0-9]*\([0-9]\+\).*@\1@'`
+                  - 'if [ ! -z "$SID" ] && [ ! -e /tmp/sapstat1.$SID ]; then'
+                  - 'echo -e "${SID}:"'
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetSystemInstanceList > /tmp/sapstat2.$$
+                  - 'sed -n ''/hostname/,$p'' /tmp/sapstat2.$$  > /tmp/sapstat1.$SID'
+                  - echo -e "$(eval "echo -e \"`< /tmp/sapstat1.$SID `\"")"
+                  - fi
+                  - done < /tmp/profilelist.txt
+                  - rm /tmp/sapstat*
+                  - rm /tmp/profilelist.txt
+              CloudWatchOutputConfig:
+                  CloudWatchLogGroupName: !Ref CWLogsLocation
+                  CloudWatchOutputEnabled: true
+              TimeoutSeconds: 120
+            isEnd: true
+          - name: STOP_QUERY_AWS_APPInstanceId
+            description: !Sub |
+              Step Summary
+
+              ***
+
+              **  Query the app instance based on the SID and Role tag **
+              Check the following
+                - tag: ${RoleTagKey} = APP
+                - tag: ${SIDTagKey} = (parameter)
+                - tag: ${SSMEnableTagKey} = TRUE
+
+              ***
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: ec2
+              Api: DescribeInstances
+              Filters:
+                - Name: !Sub 'tag:${SIDTagKey}'
+                  Values:
+                    - '*{{SID}}*'
+                - Name: !Sub 'tag:${RoleTagKey}'
+                  Values:
+                    - '*APP*'
+                - Name: !Sub 'tag:${SSMEnableTagKey}'
+                  Values:
+                    - 'TRUE'
+            outputs:
+              - Name: APPInstanceId
+                Selector: '$.Reservations[0].Instances[0].InstanceId'
+                Type: String
+              - Name: APPInstanceIdState
+                Selector: '$.Reservations[0].Instances[0].State.Name'
+                Type: String
+            onFailure: Abort
+            nextStep: STOP_QUERY_AWS_ASCSInstanceId
+          - name: STOP_QUERY_AWS_ASCSInstanceId
+            description: !Sub |
+              Step Summary
+
+              ***
+
+              ** Query the ASCS instance id based on the SID and Role tag **
+
+              Check the following
+                - tag: ${RoleTagKey} = SCS
+                - tag: ${SIDTagKey} = (parameter)
+                - tag: ${SSMEnableTagKey} = TRUE
+
+              ***
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: ec2
+              Api: DescribeInstances
+              Filters:
+                - Name: !Sub 'tag:${SIDTagKey}'
+                  Values:
+                    - '*{{SID}}*'
+                - Name: !Sub 'tag:${RoleTagKey}'
+                  Values:
+                    - '*SCS*'
+                - Name: !Sub 'tag:${SSMEnableTagKey}'
+                  Values:
+                    - 'TRUE'
+            outputs:
+              - Name: ASCSInstanceId
+                Selector: '$.Reservations[0].Instances[0].InstanceId'
+                Type: String
+              - Name: ASCSInstanceIdState
+                Selector: '$.Reservations[0].Instances[0].State.Name'
+                Type: String
+            onFailure: Abort
+            nextStep: STOP_QUERY_AWS_DBInstanceId
+          - name: STOP_QUERY_AWS_DBInstanceId
+            action: 'aws:executeAwsApi'
+            inputs:
+              Service: ec2
+              Api: DescribeInstances
+              Filters:
+                - Name: !Sub 'tag:${HanaTenantTagKey}'
+                  Values:
+                    - '*{{SID}}*'
+                - Name: !Sub 'tag:${RoleTagKey}'
+                  Values:
+                    - '*HANA*'
+                - Name: !Sub 'tag:${SSMEnableTagKey}'
+                  Values:
+                    - 'TRUE'
+            outputs:
+              - Name: DBInstanceId
+                Selector: '$.Reservations[0].Instances[0].InstanceId'
+                Type: String
+              - Name: DBInstanceIdState
+                Selector: '$.Reservations[0].Instances[0].State.Name'
+                Type: String
+            onFailure: Abort
+            nextStep: STOP_QUERY_AWS_Confirm_APPInstanceId_Tags_and_State
+          - name: STOP_QUERY_AWS_Confirm_APPInstanceId_Tags_and_State
+            description: |
+              Step Summary
+
+              ***
+
+              ** Determine if the APP instance is already stopped and either stop it or continue**
+
+              ***
+            action: 'aws:branch'
+            inputs:
+              Choices:
+              - NextStep: STOP_SAP_APP
+                Variable: '{{ STOP_QUERY_AWS_APPInstanceId.APPInstanceIdState }}'
+                StringEquals: running
+              - NextStep: STOP_QUERY_AWS_Confirm_ASCSInstanceId_Tags_and_State
+                Variable: '{{ STOP_QUERY_AWS_APPInstanceId.APPInstanceIdState }}'
+                StringEquals: stopped
+              Default: STOP_SAP_APP
+            isEnd: true
+          - name: STOP_SAP_APP
+            action: 'aws:runCommand'
+            maxAttempts: 1
+            inputs:
+              DocumentName: AWS-RunShellScript
+              InstanceIds:
+                - '{{ STOP_QUERY_AWS_APPInstanceId.APPInstanceId }}'
+              Parameters:
+                commands:
+                  - '#!/bin/bash'
+                  - >-
+                    SAPProfile=`grep -o 'pf=[^[:space:]]*' /usr/sap/sapservices | grep
+                    _D`
+                  - 'SID=`echo ${SAPProfile} | awk -F "/" ''{print $4}''`'
+                  - >-
+                    SYSTEMNO=`echo ${SAPProfile} | awk -F "/" '{print $7}' | awk -F "_"
+                    '{print $2}' | sed 's@^[^0-9]*\([0-9]\+\).*@\1@'`
+                  - 'echo "Running command:"'
+                  - >-
+                    echo "/usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetSystemInstanceList"
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetSystemInstanceList
+                  - '        if [ $? -eq 0 ]'
+                  - '        then'
+                  - '           echo "There is a system here, I am going to use stop"'
+                  - '           /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function StopWait 300 2'
+                  - '        else'
+                  - '           echo "There is no service running for instance number ${SYSTEMNO} "'
+                  - '                        exit 1'
+                  - fi
+                  - echo "*** Checking that it stopped successfully"
+                  - 'echo "Running command:"'
+                  - >-
+                    echo "/usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetProcessList"
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetProcessList
+                  - 'if [ $? -eq 4 ]'
+                  - '        then'
+                  - '           echo "`date +%F\ %T`: The application stopped successfully"'
+                  - '        else'
+                  - '        echo "The return code was $? "'
+                  - '           exit 1'
+                  - '        fi'
+              CloudWatchOutputConfig:
+                  CloudWatchLogGroupName: !Ref CWLogsLocation
+                  CloudWatchOutputEnabled: true
+              TimeoutSeconds: 120
+            onFailure: Abort
+            nextStep: STOP_QUERY_AWS_Confirm_ASCSInstanceId_Tags_and_State
+          - name: STOP_QUERY_AWS_Confirm_ASCSInstanceId_Tags_and_State
+            description: |
+              Step Summary
+
+              ***
+
+              ** Determine if the ASCS instance is already stopped and either stop it or continue**
+
+              ***
+            action: 'aws:branch'
+            inputs:
+              Choices:
+              - NextStep: STOP_SAP_ASCS
+                Variable: '{{ STOP_QUERY_AWS_ASCSInstanceId.ASCSInstanceIdState }}'
+                StringEquals: running
+              - NextStep: STOP_QUERY_AWS_Confirm_DBInstanceId_Tags_and_State
+                Variable: '{{ STOP_QUERY_AWS_ASCSInstanceId.ASCSInstanceIdState }}'
+                StringEquals: stopped
+              Default: STOP_SAP_ASCS
+            isEnd: true
+          - name: STOP_SAP_ASCS
+            description: |
+              Step Summary
+
+              ***
+
+              ** Stop SAP ASCS application on the instance **
+                - Gets the system number from `/usr/sap/services`
+                - Starts ASCS using `sapcontrol`
+
+              ***
+            action: 'aws:runCommand'
+            maxAttempts: 1
+            inputs:
+              DocumentName: AWS-RunShellScript
+              InstanceIds:
+                - '{{ STOP_QUERY_AWS_ASCSInstanceId.ASCSInstanceId }}'
+              Parameters:
+                commands:
+                  - '#!/bin/bash'
+                  - >-
+                    SAPProfile=`grep -o 'pf=[^[:space:]]*' /usr/sap/sapservices | grep
+                    _ASCS`
+                  - 'SID=`echo ${SAPProfile} | awk -F "/" ''{print $4}''`'
+                  - >-
+                    SYSTEMNO=`echo ${SAPProfile} | awk -F "/" '{print $7}' | awk -F "_"
+                    '{print $2}' | sed 's@^[^0-9]*\([0-9]\+\).*@\1@'`
+                  - 'echo "Running command:"'
+                  - >-
+                    echo "/usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetSystemInstanceList"
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetSystemInstanceList
+                  - '        if [ $? -eq 0 ]'
+                  - '        then'
+                  - '           echo "There is a system here, I am going to use stop"'
+                  - '           /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function StopWait 300 2'
+                  - '        else'
+                  - '           echo "There is no service running for instance number ${SYSTEMNO} "'
+                  - '                        exit 1'
+                  - fi
+                  - echo "*** Checking that it stopped successfully"
+                  - 'echo "Running command:"'
+                  - >-
+                    echo "/usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetProcessList"
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetProcessList
+                  - 'if [ $? -eq 4 ]'
+                  - '        then'
+                  - '           echo "`date +%F\ %T`: The application stopped successfully"'
+                  - '        else'
+                  - '        echo "The return code was $? "'
+                  - '           exit 1'
+                  - '        fi'
+              CloudWatchOutputConfig:
+                  CloudWatchLogGroupName: !Ref CWLogsLocation
+                  CloudWatchOutputEnabled: true
+              TimeoutSeconds: 120
+            onFailure: Abort
+            nextStep: STOP_QUERY_AWS_Confirm_DBInstanceId_Tags_and_State
+          - name: STOP_QUERY_AWS_Confirm_DBInstanceId_Tags_and_State
+            description: |
+              Step Summary
+
+              ***
+
+              ** Determine if the DB instance is already stopped and either stop it or continue**
+
+              ***
+            action: 'aws:branch'
+            inputs:
+              Choices:
+              - NextStep: STOP_DB_HANA
+                Variable: '{{ STOP_QUERY_AWS_DBInstanceId.DBInstanceIdState }}'
+                StringEquals: running
+              - NextStep: STOP_AWS_APPInstanceId
+                Variable: '{{ STOP_QUERY_AWS_DBInstanceId.DBInstanceIdState }}'
+                StringEquals: stopped
+              Default: STOP_DB_HANA
+            isEnd: true
+          - name: STOP_DB_HANA
+            description:  |
+              Step Summary
+
+              ***
+
+              ** Stop HANA application on the instance **
+                - Gets the system number from `/usr/sap/services`
+                - Stops the HANA DB using `sapcontrol`
+
+              ***
+            action: 'aws:runCommand'
+            maxAttempts: 1
+            inputs:
+              DocumentName: AWS-RunShellScript
+              InstanceIds:
+                - '{{ STOP_QUERY_AWS_DBInstanceId.DBInstanceId }}'
+              Parameters:
+                commands:
+                  - '#!/bin/bash'
+                  - >-
+                    SAPProfile=`grep -o 'pf=[^[:space:]]*' /usr/sap/sapservices | grep
+                    _HDB`
+                  - 'SID=`echo ${SAPProfile} | awk -F "/" ''{print $4}''`'
+                  - >-
+                    SYSTEMNO=`echo ${SAPProfile} | awk -F "/" '{print $7}' | awk -F "_"
+                    '{print $2}' | sed 's@^[^0-9]*\([0-9]\+\).*@\1@'`
+                  - >-
+                    echo  "Running /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO}
+                    -function GetSystemInstanceList"
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetSystemInstanceList
+                  - 'if [ $? -eq 0 ]'
+                  - then
+                  - 'echo "There is a system here, I am going to use stop"'
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function StopWait
+                    600 2
+                  - else
+                  - 'echo "There is no service running for instance number ${SYSTEMNO} "'
+                  - exit 1
+                  - fi
+                  - >-
+                    /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+                    GetProcessList
+                  - 'if [ $? -eq 4 ]'
+                  - '        then'
+                  - '           echo "`date +%F\ %T`: The HANA Database Stopped Successfully"'
+                  - '        else'
+                  - '        echo "The return code was $? "'
+                  - '           exit 1'
+                  - '        fi'
+              CloudWatchOutputConfig:
+                  CloudWatchLogGroupName: !Ref CWLogsLocation
+                  CloudWatchOutputEnabled: true
+              TimeoutSeconds: 600
+            onFailure: Abort
+            nextStep: STOP_AWS_APPInstanceId
+          - name: STOP_AWS_APPInstanceId
+            description: |
+              Step Summary
+
+              ***
+
+              **  Stop the AWS EC2 Instance where APP runs **
+
+              - Uses the InstanceId from STOP_QUERY_AWS_APPInstanceId
+              - Changes the state of this instance to "Stopped" if not already stopped
+
+              ***
+            action: 'aws:changeInstanceState'
+            inputs:
+              InstanceIds:
+                - '{{STOP_QUERY_AWS_APPInstanceId.APPInstanceId}}'
+              DesiredState: stopped
+            onFailure: Abort
+            nextStep: STOP_AWS_ASCSInstanceId
+          - name: STOP_AWS_ASCSInstanceId
+            description: |
+              Step Summary
+
+              ***
+
+              **  Stop the AWS EC2 Instance where ASCS runs **
+
+              - Uses the InstanceId from STOP_QUERY_AWS_ASCSInstanceId
+              - Changes the state of this instance to "Stopped" if not already stopped
+
+              ***
+            action: 'aws:changeInstanceState'
+            inputs:
+              InstanceIds:
+                - '{{STOP_QUERY_AWS_ASCSInstanceId.ASCSInstanceId}}'
+              DesiredState: stopped
+            onFailure: Abort
+            nextStep: STOP_AWS_DBInstanceId
+          - name: STOP_AWS_DBInstanceId
+            description: |
+              Step Summary
+
+              ***
+
+              ** Stop the AWS EC2 Instance where HANA runs **
+
+              - Uses the InstanceId from STOP_QUERY_AWS_DBInstanceId
+              - Changes the state of this instance to "Stopped" if not already stopped
+
+              ***
+            action: 'aws:changeInstanceState'
+            inputs:
+              InstanceIds:
+                - '{{STOP_QUERY_AWS_DBInstanceId.DBInstanceId}}'
+              DesiredState: stopped
+            onFailure: Abort
+            nextStep: STATUS_REPORT_BACK
+          # - name: STATUS_QUERY_AWS_ASCSInstanceId
+          #   description: !Sub |
+          #     Step Summary
+          #
+          #     ***
+          #
+          #     **  Query the ASCS instance based on the SID and Role tag **
+          #     Check the following
+          #       - tag: ${RoleTagKey} = SCS
+          #       - tag: ${SIDTagKey} = (parameter)
+          #       - tag: ${SSMEnableTagKey} = TRUE
+          #
+          #     ***
+          #   action: 'aws:executeAwsApi'
+          #   inputs:
+          #     Service: ec2
+          #     Api: DescribeInstances
+          #     Filters:
+          #       - Name: !Sub 'tag:${SIDTagKey}'
+          #         Values:
+          #           - '*{{SID}}*'
+          #       - Name: !Sub 'tag:${RoleTagKey}'
+          #         Values:
+          #           - '*SCS*'
+          #       - Name: !Sub 'tag:${SSMEnableTagKey}'
+          #         Values:
+          #           - 'TRUE'
+          #   outputs:
+          #     - Name: ASCSInstanceId
+          #       Selector: '$.Reservations[0].Instances[0].InstanceId'
+          #       Type: String
+          #     - Name: ASCSInstanceIdState
+          #       Selector: '$.Reservations[0].Instances[0].State.Name'
+          #       Type: String
+          #   onFailure: Abort
+          #   nextStep: STATUS_QUERY_AWS_Confirm_ASCSInstanceId_Tags_and_State
+          # - name: STATUS_QUERY_AWS_Confirm_ASCSInstanceId_Tags_and_State
+          #   description: |
+          #     Step Summary
+          #
+          #     ***
+          #
+          #     ** Determine if the ASCS instance is already stopped and either stop it or continue**
+          #
+          #     ***
+          #   action: 'aws:branch'
+          #   inputs:
+          #     Choices:
+          #     - NextStep: STATUS_QUERY_SAP_Status
+          #       Variable: '{{ STATUS_QUERY_AWS_ASCSInstanceId.ASCSInstanceIdState }}'
+          #       StringEquals: running
+          #     - NextStep: STATUS_REPORT_BACK
+          #       Variable: '{{ STATUS_QUERY_AWS_ASCSInstanceId.ASCSInstanceIdState }}'
+          #       StringEquals: stopped
+          #   isEnd: true
+          # - name: STATUS_QUERY_SAP_Status
+          #   description: |
+          #     Step Summary
+          #
+          #     ***
+          #
+          #     ** Query the SCS for overall SAP status **
+          #       - For each system in  `/usr/sap/services`
+          #       - Output the System Instance List
+          #
+          #     ***
+          #   action: 'aws:runCommand'
+          #   maxAttempts: 1
+          #   onFailure: Abort
+          #   inputs:
+          #     DocumentName: AWS-RunShellScript
+          #     InstanceIds:
+          #       - '{{ STATUS_QUERY_AWS_ASCSInstanceId.ASCSInstanceId }}'
+          #     Parameters:
+          #       commands:
+          #         - '#!/bin/bash '
+          #         - >-
+          #           grep -o 'pf=[^[:space:]]*' /usr/sap/sapservices >
+          #           /tmp/profilelist.txt
+          #         - while read line
+          #         - do
+          #         - 'SID=`echo ${line} | awk -F "/" ''{print $4}''`'
+          #         - >-
+          #           SYSTEMNO=`echo ${line} | awk -F "/" '{print $7}' | awk -F "_" '{print
+          #           $2}' | sed 's@^[^0-9]*\([0-9]\+\).*@\1@'`
+          #         - 'if [ ! -z "$SID" ] && [ ! -e /tmp/sapstat1.$SID ]; then'
+          #         - 'echo -e "${SID}:"'
+          #         - >-
+          #           /usr/sap/hostctrl/exe/sapcontrol -nr ${SYSTEMNO} -function
+          #           GetSystemInstanceList > /tmp/sapstat1.$$
+          #         - 'sed -n ''/hostname/,$p'' /tmp/sapstat1.$$  > /tmp/sapstat1.$SID'
+          #         - echo -e "$(eval "echo -e \"`< /tmp/sapstat1.$SID `\"")"
+          #         - fi
+          #         - done < /tmp/profilelist.txt
+          #         - rm /tmp/sapstat*
+          #         - rm /tmp/profilelist.txt
+          #     CloudWatchOutputConfig:
+          #       CloudWatchLogGroupName: !Ref CWLogsLocation
+          #       CloudWatchOutputEnabled: true
+          #     TimeoutSeconds: 120
+          #   isEnd: true
+          - name: STATUS_REPORT_BACK
+            description: |
+              Step Summary
+
+              ***
+
+              ** Placeholder Step **
+                - Step indicates the end... Successfully I assume :)
+
+              ***
+            action: aws:sleep
+            inputs:
+              Duration: PT3S
+            isEnd: true
+  EBRuleFailedStep:
+    Type: 'AWS::Events::Rule'
+    Properties:
+        Description: Event bridge rule to report on a failed step in sapstopstart automation
+        Name: !Sub '${SSMSAPStartStopEventRulePrefix}-stepfail'
+        EventPattern:
+          source:
+            - aws.ssm
+          detail-type:
+            - EC2 Automation Step Status-change Notification
+          detail:
+            Status:
+              - "Failed"
+              - "TimedOut"
+            Definition:
+              - !Ref SapSsmDocument
+        State: ENABLED
+        Targets:
+            - Arn: !Ref SNSTopic
+              Id: id1
+              InputTransformer:
+                InputPathsMap:
+                     SSMDocName : "$.detail.Definition"
+                     ExecutionId : "$.detail.ExecutionId"
+                     region : "$.region"
+                     status : "$.detail.Status"
+                     stepname : "$.detail.StepName"
+                InputTemplate: |
+                    "The SSM Document <SSMDocName> FAILED in STEP:<stepname>"
+                    "Refer to the details at https://<region>.console.aws.amazon.com/systems-manager/automation/execution/<ExecutionId>?region=<region>"
+  EBRuleAutomationStatus:
+    Type: 'AWS::Events::Rule'
+    Properties:
+        Description: Event bridge rule to report the status of a sapstopstart automation
+        Name: !Sub '${SSMSAPStartStopEventRulePrefix}-automationstatus'
+        EventPattern:
+          source:
+            - aws.ssm
+          detail-type:
+            - EC2 Automation Execution Status-change Notification
+          detail:
+            Status:
+              - "Failed"
+              - "TimedOut"
+              - "Success"
+              - "Pending"
+              - "InProgress"
+              - "Cancelled"
+            Definition:
+              - !Ref SapSsmDocument
+        State: ENABLED
+        Targets:
+            - Arn: !Ref SNSTopic
+              Id: id1
+              InputTransformer:
+                InputPathsMap:
+                     SSMDocName : "$.detail.Definition"
+                     ExecutionId : "$.detail.ExecutionId"
+                     region : "$.region"
+                     status : "$.detail.Status"
+                InputTemplate: |
+                    "The SSM Document <SSMDocName> has status <status>"
+                    "Refer to the details at https://<region>.console.aws.amazon.com/systems-manager/automation/execution/<ExecutionId>?region=<region>"
+  EventTopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: '*'
+      Topics:
+        - !Ref SNSTopic
+Outputs:
+  SapSsmDocument:
+    Description: Name of the SAP Automation Document
+    Value: !Ref SapSsmDocument
+    Export:
+      Name:  !Join [ ":", [ !Ref "AWS::StackName", SapSsmDocument ] ]
+  SNSTopic:
+    Description: SNS Topic to subscribe to
+    Value: !Ref SNSTopic
