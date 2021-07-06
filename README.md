@@ -37,7 +37,7 @@ An IAM Role - Ensure the use of least privilege
 Once complete. Select _Next_, then under configure stack options select _Next_, review the inputs and select _Create Stack_.
 Note: If you are redeploying this template, consider deleting old stacks.
 
-![image_specify_stack_details](images/2021/06/image-specify-stack-details.png)
+![image_specify_stack_details](images/image-specify-stack-details.png)
 
 
 2. Subscribe to the email which should arrive in your inbox to receive notifications.
