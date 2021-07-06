@@ -42,7 +42,7 @@ Note: If you are redeploying this template, consider deleting old stacks.
 
 2. Subscribe to the email which should arrive in your inbox to receive notifications.
 
-![image-email-subscription](images/2021/06/image-email-subscription.png)
+![image-email-subscription](images/image-email-subscription.png)
 
 
 3. Check all instances are configured as targets for for [Systems Manager Automation](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-setting-up.html) on EC2 instances including the appropriate instance roles.
@@ -50,13 +50,13 @@ Note: If you are redeploying this template, consider deleting old stacks.
 4. Setup tags to enable and identify the instances, according to the naming standard defined when you created the stack. Note: the Cloudformation is setup to allow the definition of a different set of tags, but using a prefix like “ssmsap:” clearly identifies a purpose for the tags and will reduce the likelihood of unrelated changes.
 These tags can be added manually to the EC2 Instance tab in the console, or incorporated in your infrastructure deployment templates.
 
-![image_required_tags](images/2021/06/image-required-tags.png)
+![image_required_tags](images/image-required-tags.png)
 
 ## Usage
 
 Under Systems Manager > Automation. Select Execute Automation and find the document under “Owned by me”. Familiarise yourself with the document by reading through the document and step descriptions.
 
-![image_ssm_doc_descriptions](images/2021/06/image-ssm-doc-descriptions.png)
+![image_ssm_doc_descriptions](images/image-ssm-doc-descriptions.png)
 
 
 Execute the automation document. We suggest starting with a simple execution, but it is also possible to run parallel documents for multiple SIDs using the rate control option.
@@ -67,7 +67,7 @@ Select a role which can be used to execute the automation, or leave blank to exe
 
 Monitor the progress. Note: not all steps are run (stop steps for stop, start steps for start). The execution may expand over multiple pages. The overall status section will let you know whether the document is finished. You should also receive an email with a link back to this section in the console. Select the Step ID for more details on the error (if applicable).
 
-![image_step_progress](images/2021/06/image-step-progress.png)
+![image_step_progress](images/image-step-progress.png)
 
 
 Check SAP connectivity or Instance Status to ensure the Runbook status matches with that of the SAP system.
