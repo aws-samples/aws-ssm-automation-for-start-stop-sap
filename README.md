@@ -67,14 +67,14 @@ Note: If you are redeploying this template, consider deleting old stacks.
 <img src="/images/image-tags-from-cfn.png" alt="image-tags-from-cfn" width=80% >
 </p>
 
-    These tags can be added manually to the EC2 Instance tab in the console, or incorporated in your infrastructure deployment templates. Note: The SID of the HANA system (e.g HDB) is not required. Use the Netweaver SID as the HanaTenant value to link the components together. See the diagram for an example. Take care as any typos may cause errors.
+These tags can be added manually to the EC2 Instance tab in the console, or incorporated in your infrastructure deployment templates. Note: The SID of the HANA system (e.g HDB) is not required. Use the Netweaver SID as the HanaTenant value to link the components together. See the diagram for an example. Take care as any typos may cause errors.
 
-    The tag requirements are as follows if using the default tag names. Otherwise adjust to match the values entered during deployment.
-    - NOTE: Tag filters are case sensitive, the tag keys are as entered, tag values in uppercase.
-        - (all) ** ssmsap:enabled  = ** TRUE (or false to disable)
-        - (all) ** ssmsap:role = ** HANA,APP,SCS or combination (if app and scs are on the same instance use APP,SCS all in one use HANA,SCS,APP (order not critical))
-        - (on the app and scs) ** ssmsap:sid =  ** The SID of the Netweaver system.
-        - (on the hana system) ** ssmsap:hanatenant = ** The SID of the Netweaver system (not the HANA SID unless its the same). Use SAP SID even if your actual db tenant name is not aligned with SID.
+The tag requirements are as follows if using the default tag names. Otherwise adjust to match the values entered during deployment.
+- NOTE: Tag filters are case sensitive, the tag keys are as entered, tag values in uppercase.
+    - (all) ** ssmsap:enabled  = ** TRUE (or false to disable)
+    - (all) ** ssmsap:role = ** HANA,APP,SCS or combination (if app and scs are on the same instance use APP,SCS all in one use HANA,SCS,APP (order not critical))
+    - (on the app and scs) ** ssmsap:sid =  ** The SID of the Netweaver system.
+    - (on the hana system) ** ssmsap:hanatenant = ** The SID of the Netweaver system (not the HANA SID unless its the same). Use SAP SID even if your actual db tenant name is not aligned with SID.
 
 <p align="center">
 <img src="/images/image-required-tags.png" alt="image-required-tags" width=80% >
